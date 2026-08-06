@@ -1,0 +1,5 @@
+# GXU Agent 同步配置
+# 将本文件重命名为 sync.conf 并填写账号密码，sync.bat 会自动读取
+# 注意：此文件包含你的账号密码，请勿分享给他人
+WJXT_USERNAME=你的学号
+WJXT_PASSWORD=你的密码

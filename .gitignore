@@ -1,0 +1,44 @@
+# ==== 敏感信息（绝不提交） ====
+# API Key
+.env
+backend/.env
+
+# 账号密码配置
+sync.conf
+
+# ==== Python ====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ==== Node ====
+node_modules/
+dist/
+*.tsbuildinfo
+
+# ==== 数据文件（不应入库） ====
+# 数据库
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ChromaDB 向量数据
+chroma_data/
+
+# 增量同步标记
+data/
+
+# ==== Claude / IDE / 系统 ====
+.claude/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ==== 日志 ====
+*.log

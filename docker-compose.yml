@@ -1,0 +1,31 @@
+services:
+  backend:
+    build: ./backend
+    container_name: gxu-agent-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-chat}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
+      - EMBEDDING_DEVICE=cpu
+      # 数据目录指向挂载卷
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/school_rag.db
+      - CHROMA_PERSIST_DIR=/app/data/chroma_data
+    volumes:
+      - ./data:/app/data
+      - hf_cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: gxu-agent-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  hf_cache:
