@@ -21,6 +21,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -28,6 +29,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.request
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -106,10 +109,95 @@ def run_gh(args: list[str], capture: bool = False) -> subprocess.CompletedProces
         sys.exit(1)
 
 
+def has_gh() -> bool:
+    """检查 gh CLI 是否可用"""
+    return shutil.which("gh") is not None
+
+
 def get_repo() -> str:
-    """获取当前仓库的 owner/name"""
-    result = run_gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], capture=True)
-    return result.stdout.strip()
+    """获取仓库 owner/name。
+
+    优先从 git remote 解析（无需 gh CLI）；失败才回退到 gh。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            m = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$", url)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+
+    if has_gh():
+        result = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+
+    log("无法确定仓库地址：未找到 git remote origin，也未安装 gh CLI", "❌")
+    sys.exit(1)
+
+
+# ============ GitHub API（无需 gh CLI） ============
+
+def github_api(path: str):
+    """调用 GitHub REST API（公开仓库无需认证）"""
+    url = f"https://api.github.com{path}"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "gxu-agent-snapshot",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            log(f"仓库或资源不存在: {path}", "❌")
+            log("  若是私有仓库，请改用 gh CLI 或先设为 public", "  ")
+        else:
+            log(f"GitHub API 错误 {e.code}: {e.reason}", "❌")
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        log(f"无法访问 GitHub API: {e.reason}", "❌")
+        log("  国内网络请设置代理: HTTPS_PROXY=http://127.0.0.1:7890", "  ")
+        sys.exit(1)
+
+
+def fetch_data_releases() -> list[dict]:
+    """获取所有 data-* release（含 assets 信息）"""
+    repo = get_repo()
+    releases = github_api(f"/repos/{repo}/releases?per_page=50")
+    return [r for r in releases if r.get("tag_name", "").startswith("data-")]
+
+
+def download_file(url: str, dest: Path):
+    """下载文件（带简单进度）"""
+    req = urllib.request.Request(url, headers={"User-Agent": "gxu-agent-snapshot"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            done = 0
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        pct = done * 100 // total
+                        print(f"\r   下载中... {pct}%  ({done/1024/1024:.1f}/{total/1024/1024:.1f} MB)", end="")
+            print()  # 换行
+    except urllib.error.URLError as e:
+        log(f"下载失败: {e.reason}", "❌")
+        log("  国内网络请设置代理: HTTPS_PROXY=http://127.0.0.1:7890", "  ")
+        sys.exit(1)
 
 
 # ============ 导出 ============
@@ -204,44 +292,50 @@ def publish_snapshot(snapshot_path: Path, tag: str | None = None):
 def list_snapshots():
     """列出所有已发布的数据快照"""
     log("查询可用快照...", "🔍")
-    result = run_gh(
-        ["release", "list", "--limit", "20", "--json", "tagName,publishedAt,name,isLatest",
-         "-q", '.[] | select(.tagName | startswith("data-")) | "\\(.tagName)  \\(.publishedAt)  \\(.name)"'],
-        capture=True,
-    )
-    out = result.stdout.strip()
-    if not out:
+    releases = fetch_data_releases()
+    if not releases:
         log("暂无已发布的数据快照", "  ")
-    else:
-        print()
-        for line in out.splitlines():
-            log(line, "  ")
+        return
+
+    print()
+    for r in releases:
+        size = 0
+        for a in r.get("assets", []):
+            size += a.get("size", 0)
+        size_mb = f"{size/1024/1024:.1f} MB" if size else "?"
+        published = (r.get("published_at") or "")[:10]
+        log(f"{r['tag_name']}   {published}   {size_mb}", "  ")
 
 
 def download_snapshot(tag: str | None = None, force: bool = False):
-    """从 GitHub Release 下载并恢复快照"""
+    """从 GitHub Release 下载并恢复快照（通过 GitHub API，无需 gh CLI）"""
+    releases = fetch_data_releases()
+    if not releases:
+        log("未找到任何数据快照，请先在有数据的机器上运行 publish", "❌")
+        sys.exit(1)
+
+    # 选定 release
     if tag is None:
-        # 找最新的 data-* release
-        result = run_gh(
-            ["release", "list", "--limit", "50", "--json", "tagName",
-             "-q", '[.[] | select(.tagName | startswith("data-"))][0].tagName'],
-            capture=True,
-        )
-        tag = result.stdout.strip()
-        if not tag:
-            log("未找到任何数据快照，请先在有数据的机器上运行 publish", "❌")
+        release = releases[0]  # API 按时间倒序，第一个即最新
+        tag = release["tag_name"]
+    else:
+        release = next((r for r in releases if r["tag_name"] == tag), None)
+        if release is None:
+            log(f"未找到快照版本: {tag}", "❌")
+            log("  可用版本见: snapshot list", "  ")
             sys.exit(1)
 
-    log(f"下载快照: {tag}", "⬇️")
+    # 找快照文件
+    asset = next((a for a in release.get("assets", []) if a["name"].endswith(".tar.gz")), None)
+    if asset is None:
+        log(f"Release {tag} 中没有快照文件", "❌")
+        sys.exit(1)
+
+    log(f"下载快照: {tag}  ({asset['name']})", "⬇️")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        run_gh(["release", "download", tag, "--pattern", "*.tar.gz", "--dir", tmpdir])
-
-        archives = list(Path(tmpdir).glob("*.tar.gz"))
-        if not archives:
-            log("Release 中未找到快照文件", "❌")
-            sys.exit(1)
-        archive = archives[0]
+        archive = Path(tmpdir) / asset["name"]
+        download_file(asset["browser_download_url"], archive)
 
         # 覆盖检查
         if (DB_FILE.exists() or CHROMA_DIR.exists()) and not force:

@@ -56,23 +56,44 @@
 
 ## 快速启动
 
-### 1. 启动后端
+### 🆕 新环境一键初始化（推荐）
+
+clone 仓库后，跑一条命令即可开始开发（自动装依赖 + 配 Key + 导入数据快照）：
 
 ```bash
-cd backend
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+git clone https://github.com/qingqing-me/FileSystemAgent.git
+cd FileSystemAgent
+
+./setup.sh        # Linux/macOS/服务器
+setup.bat         # Windows
 ```
 
-首次启动会自动加载嵌入模型（约 1 分钟）。
+脚本会依次：
+1. 检查 Python 版本
+2. 安装后端依赖（pip，首次约 2-3 GB）
+3. 配置 `.env`（提示输入 DeepSeek API Key）
+4. **从 GitHub Release 下载数据快照**（跳过 40 分钟爬取）
+5. 安装前端依赖（npm）
 
-### 2. 启动前端
+> 数据快照约 77 MB，下载后即可直接使用，无需爬取和向量化。
+
+### 手动启动服务
+
+初始化完成后：
 
 ```bash
+# 终端 1 — 后端
+cd backend
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 终端 2 — 前端
 cd frontend
 npm run dev
 ```
 
 打开浏览器访问 **http://localhost:5173**
+
+> 首次启动会自动加载嵌入模型（约 1 分钟）。
 
 ## 项目结构
 
@@ -112,14 +133,18 @@ FileSystemAgent/
 │   ├── nginx.conf
 │   └── vite.config.ts
 │
-├── scripts/                     # 数据摄入脚本
-│   ├── ingest.ts                # 全量导入
-│   ├── sync.ts                  # 增量同步
+├── scripts/                     # 工具脚本
+│   ├── setup.py                 # 一键初始化（装依赖+配Key+导数据）
+│   ├── snapshot.py              # 数据快照（导出/发布/导入）
+│   ├── ingest.ts                # 全量导入（首次爬取）
+│   ├── sync.ts                  # 增量同步（日常更新）
 │   ├── cleanup_docs.py          # 文档清理（过滤+去重）
 │   ├── fix_consistency.py       # 数据一致性修复
 │   ├── seed_test_data.py        # 测试数据
 │   └── test_qa.py               # 问答质量测试
 │
+├── setup.bat / setup.sh         # 一键初始化（Windows / Linux）
+├── snapshot.bat / snapshot.sh   # 数据快照工具（Windows / Linux）
 ├── sync.bat                     # 一键增量同步
 ├── docker-compose.yml           # Docker 编排（待启用）
 └── README.md
@@ -300,3 +325,125 @@ docker compose up -d --build
 ```
 
 访问 http://localhost:8080
+
+---
+
+## ⚠️ 注意事项
+
+### 必须配置
+
+**1. API Key（不配则无法问答）**
+
+`backend/.env` 里必须填 DeepSeek API Key：
+
+```bash
+cp backend/.env.example backend/.env
+# 编辑 backend/.env，把 LLM_API_KEY 改成你的 key
+```
+
+获取地址：https://platform.deepseek.com/api_keys
+
+> 每个开发者用**自己的** key。仓库里只有占位符模板，不含任何真实 key。
+
+**2. 网络代理（访问 GitHub 需要）**
+
+以下操作需要能访问 GitHub，国内网络需开代理（如 Clash）：
+
+- 推送代码 `git push`
+- 发布快照 `snapshot publish`
+- 下载快照 `snapshot import` / `setup`
+
+```bash
+# git 代理（一次性配置）
+git config --global http.proxy http://127.0.0.1:7890
+git config --global https.proxy http://127.0.0.1:7890
+
+# 快照命令临时走代理
+HTTPS_PROXY=http://127.0.0.1:7890 ./snapshot.sh import
+```
+
+`setup.bat` / `snapshot.bat` 会自动检测 7890 端口并按需启用代理。
+
+### 数据安全
+
+**3. 导出快照前必须停止后端**
+
+ChromaDB 运行中导出可能导致数据不一致。`snapshot export/publish` 会检测并拒绝执行（可用 `--force` 强制跳过）。
+
+```bash
+# 停止后端（Windows）
+powershell "Get-Process python | Stop-Process -Force"
+# 停止后端（Linux）
+pkill -f uvicorn
+```
+
+**4. 导入快照会自动备份**
+
+`snapshot import` 覆盖前会把旧数据备份到 `snapshots/backup-YYYYMMDD-HHMMSS/`。
+确认新数据没问题后可手动删除备份。
+
+**5. 数据不会提交到 git**
+
+`.gitignore` 已排除：`.env`、`*.db`、`chroma_data/`、`snapshots/`、`data/`、`node_modules/`。
+数据通过 GitHub Release 分发，不进代码仓库。
+
+### 资源需求
+
+| 项目 | 需求 |
+|------|------|
+| 磁盘（依赖） | 约 2-3 GB（torch + chromadb + sentence-transformers） |
+| 磁盘（数据） | 约 156 MB（可解压）+ 77 MB（快照文件） |
+| 内存（后端运行） | 约 1-2 GB（嵌入模型常驻） |
+| 首次启动 | 下载嵌入模型 BGE-small-zh（约 100 MB，自动） |
+
+> 内存紧张时可只开后端（用 curl 测试），或关掉前端 `npm run dev`。
+
+### 常见问题
+
+**端口被占用**（8000 / 5173）
+
+```bash
+# 查看占用
+netstat -ano | findstr ":8000"        # Windows
+lsof -i :8000                          # Linux
+
+# 或换端口启动
+python -m uvicorn app.main:app --port 8001
+```
+
+**后端启动慢 / 第一次请求卡住**
+
+首次请求会加载嵌入模型（约 10-60 秒，取决于 CPU），之后正常。
+
+**问答返回"没有找到相关信息"**
+
+排查顺序：
+1. 数据是否导入 → `snapshot info` 看文档数
+2. 向量库是否完整 → 文档数应约 2990
+3. 若为 0，执行 `snapshot import`
+
+**Agent 模式偶尔"查找困难"**
+
+复杂对比问题走 Agent 多步搜索，偶尔因模型决策超轮次而放弃。重新提问或换个问法即可。
+
+**ChromaDB 报错 / 数据损坏**
+
+```bash
+snapshot import          # 从快照恢复（自动备份当前数据）
+```
+
+**代理失效导致 push 失败**
+
+先确认 Clash 在运行，再：
+
+```bash
+git config --global --get http.proxy   # 应显示 http://127.0.0.1:7890
+```
+
+如不需要代理，可清除：
+
+```bash
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+```
+
