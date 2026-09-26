@@ -32,6 +32,9 @@ chroma_data/
 # 增量同步标记
 data/
 
+# 数据快照（通过 GitHub Release 分发，不进仓库）
+snapshots/
+
 # ==== Claude / IDE / 系统 ====
 .claude/
 .idea/

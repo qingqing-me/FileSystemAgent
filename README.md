@@ -157,6 +157,39 @@ WJXT_USERNAME=你的学号 WJXT_PASSWORD=你的密码 npx tsx sync.ts
 
 **原理**：`data/last_sync.json` 记录上次同步时间，文件系统按时间倒序，遇到旧文件即停止。
 
+## 数据快照（跨机器分发数据）⭐
+
+跑一次全量摄入要 40 分钟 + embedding 时间。**快照功能**把爬好的数据打包发布到
+GitHub Release，其他环境直接下载即用，**不用重新爬取和向量化**。
+
+### 典型场景
+
+| 场景 | 操作 |
+|------|------|
+| 本地已有数据，想分享给学长/服务器 | `snapshot.bat publish` |
+| 新环境要开发，不想爬 40 分钟 | `snapshot.bat import` |
+| 服务器首次部署 | `./snapshot.sh import` |
+
+### 命令
+
+```bash
+python scripts/snapshot.py info      # 查看当前数据状态
+python scripts/snapshot.py export    # 导出快照到 snapshots/
+python scripts/snapshot.py publish   # 导出并发布到 GitHub Release
+python scripts/snapshot.py import    # 下载并恢复最新快照
+python scripts/snapshot.py list      # 列出所有已发布快照
+```
+
+Windows 用 `snapshot.bat <命令>`，Linux/macOS 用 `./snapshot.sh <命令>`。
+
+### 说明
+
+- 快照内容：SQLite 元数据 + ChromaDB 向量库 + manifest（版本/文档数）
+- 快照大小：约 **77 MB**（2990 文档 / 8339 向量块）
+- 导入会自动备份旧数据到 `snapshots/backup-*/`
+- ⚠️ **导出前请停止后端**，避免 ChromaDB 写入不一致（脚本会检测并提示）
+- 发布/下载需访问 GitHub，国内网络需代理（见下方"网络代理"）
+
 ## 自动同步（Windows 计划任务）
 
 让系统每周自动同步新文件：
@@ -189,9 +222,78 @@ WJXT_USERNAME=你的学号 WJXT_PASSWORD=你的密码 npx tsx sync.ts
 - `backend/chroma_data/` — 向量数据
 - `data/last_sync.json` — 增量同步标记
 
-## 部署
+## 网络代理
 
-Docker 部署文件已就绪（`Dockerfile`、`docker-compose.yml`、`nginx.conf`），但因国内网络访问 Docker Hub 不稳定暂未启用。有稳定网络后可：
+本项目访问 GitHub（发布/下载快照、推送代码）需要代理。
+
+```bash
+# git 全局代理（已配置过）
+git config --global http.proxy http://127.0.0.1:7890
+git config --global https.proxy http://127.0.0.1:7890
+
+# 快照命令临时走代理
+HTTPS_PROXY=http://127.0.0.1:7890 ./snapshot.sh publish
+```
+
+## 服务器部署（Linux）⭐
+
+学校服务器能访问校园网（`wjxt.gxu.edu.cn`），既作**数据源头**也作**最终部署点**：
+
+```
+服务器 (Linux, 校园内网)                 GitHub Release         本地开发
+  ├─ 定期 sync 爬新文件           ──►   快照 .tar.gz    ──►   ├─ snapshot import
+  ├─ snapshot publish 发布快照                                └─ 开发调试
+  └─ 跑 agent 服务（同学访问）
+```
+
+### 首次部署
+
+```bash
+git clone https://github.com/qingqing-me/FileSystemAgent.git
+cd FileSystemAgent
+
+# 1. 后端依赖
+cd backend && pip install -r requirements.txt && cd ..
+
+# 2. 配置 API Key
+cp backend/.env.example backend/.env
+vim backend/.env          # 填入 LLM_API_KEY
+
+# 3. 导入数据（无需爬取，直接从 Release 下载）
+./snapshot.sh import
+
+# 4. 启动后端
+cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+### 前端（生产构建 + nginx）
+
+```bash
+cd frontend
+npm install
+npm run build             # 产物在 dist/
+
+# nginx 托管 dist/ 并代理 /api 到 :8000（配置见 frontend/nginx.conf）
+cp frontend/nginx.conf /etc/nginx/conf.d/gxu-agent.conf
+systemctl reload nginx
+```
+
+### 定期更新数据（cron）
+
+服务器在校园内网，可自动同步新文件并发布快照：
+
+```bash
+crontab -e
+
+# 每周一 8:00：同步新文件 + 发布快照
+0 8 * * 1 cd /opt/FileSystemAgent && WJXT_USERNAME=学号 WJXT_PASSWORD=密码 npx tsx scripts/sync.ts && HTTPS_PROXY=http://127.0.0.1:7890 ./snapshot.sh publish
+```
+
+这样服务器数据持续保持最新，本地开发随时 `snapshot import` 拉最新快照。
+
+### Docker（可选）
+
+Docker 部署文件已就绪（`Dockerfile`、`docker-compose.yml`、`nginx.conf`），需网络能访问 Docker Hub：
 
 ```bash
 docker compose up -d --build
